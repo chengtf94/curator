@@ -1,22 +1,3 @@
-/*
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
- *
- *   http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
- */
-
 package org.apache.curator.framework.recipes.locks;
 
 import com.google.common.collect.Maps;
@@ -31,6 +12,8 @@ import org.apache.curator.framework.CuratorFramework;
 import org.apache.curator.utils.PathUtils;
 
 /**
+ * 分布式可重入排它锁
+ *
  * A re-entrant mutex that works across JVMs. Uses Zookeeper to hold the lock. All processes in all JVMs that
  * use the same lock path will achieve an inter-process critical section. Further, this mutex is
  * "fair" - each user will get the mutex in the order requested (from ZK's point of view)
@@ -54,19 +37,10 @@ public class InterProcessMutex implements InterProcessLock, Revocable<InterProce
 
     private static final String LOCK_NAME = "lock-";
 
-    /**
-     * @param client client
-     * @param path   the path to lock
-     */
+    /** 构造方法 */
     public InterProcessMutex(CuratorFramework client, String path) {
         this(client, path, new StandardLockInternalsDriver());
     }
-
-    /**
-     * @param client client
-     * @param path   the path to lock
-     * @param driver lock driver
-     */
     public InterProcessMutex(CuratorFramework client, String path, LockInternalsDriver driver) {
         this(client, path, LOCK_NAME, 1, driver);
     }
