@@ -12,97 +12,79 @@ import org.apache.curator.framework.CuratorFramework;
 import org.apache.curator.utils.PathUtils;
 
 /**
- * 分布式可重入排它锁
- *
- * A re-entrant mutex that works across JVMs. Uses Zookeeper to hold the lock. All processes in all JVMs that
- * use the same lock path will achieve an inter-process critical section. Further, this mutex is
- * "fair" - each user will get the mutex in the order requested (from ZK's point of view)
+ * 分布式可重入排它锁：可重入、公平
  */
 public class InterProcessMutex implements InterProcessLock, Revocable<InterProcessMutex> {
+
+    /** 锁内置辅助对象、ZK父节点路径、线程数据Map（key为线程，value为该线程持有的锁数据） */
     private final LockInternals internals;
     private final String basePath;
-
     private final ConcurrentMap<Thread, LockData> threadData = Maps.newConcurrentMap();
-
     private static class LockData {
+        /** 持有锁的线程、锁对应的子节点路径、锁重入次数 */
         final Thread owningThread;
         final String lockPath;
         final AtomicInteger lockCount = new AtomicInteger(1);
-
         private LockData(Thread owningThread, String lockPath) {
             this.owningThread = owningThread;
             this.lockPath = lockPath;
         }
     }
 
-    private static final String LOCK_NAME = "lock-";
-
     /** 构造方法 */
     public InterProcessMutex(CuratorFramework client, String path) {
         this(client, path, new StandardLockInternalsDriver());
     }
     public InterProcessMutex(CuratorFramework client, String path, LockInternalsDriver driver) {
+        // maxLeases写死为1,表示只有一个线程能获得资源
         this(client, path, LOCK_NAME, 1, driver);
     }
+    private static final String LOCK_NAME = "lock-";
+    InterProcessMutex(
+            CuratorFramework client, String path, String lockName, int maxLeases, LockInternalsDriver driver) {
+        basePath = PathUtils.validatePath(path);
+        internals = new LockInternals(client, driver, path, lockName, maxLeases);
+    }
 
-    /**
-     * Acquire the mutex - blocking until it's available. Note: the same thread
-     * can call acquire re-entrantly. Each call to acquire must be balanced by a call
-     * to {@link #release()}
-     *
-     * @throws Exception ZK errors, connection interruptions
-     */
+    /** 获取锁：直到获取成功为止 */
     @Override
     public void acquire() throws Exception {
         if (!internalLock(-1, null)) {
             throw new IOException("Lost connection while trying to acquire lock: " + basePath);
         }
     }
-
-    /**
-     * Acquire the mutex - blocks until it's available or the given time expires. Note: the same thread
-     * can call acquire re-entrantly. Each call to acquire that returns true must be balanced by a call
-     * to {@link #release()}
-     *
-     * @param time time to wait
-     * @param unit time unit
-     * @return true if the mutex was acquired, false if not
-     * @throws Exception ZK errors, connection interruptions
-     */
     @Override
     public boolean acquire(long time, TimeUnit unit) throws Exception {
         return internalLock(time, unit);
     }
-
-    /**
-     * Returns true if the mutex is acquired by a thread in this JVM
-     *
-     * @return true/false
-     */
-    @Override
-    public boolean isAcquiredInThisProcess() {
-        return (threadData.size() > 0);
+    private boolean internalLock(long time, TimeUnit unit) throws Exception {
+        // #1 判断是否重入
+        Thread currentThread = Thread.currentThread();
+        LockData lockData = threadData.get(currentThread);
+        if (lockData != null) {
+            // re-entering
+            lockData.lockCount.incrementAndGet();
+            return true;
+        }
+        // #2 若不是重入，则尝试获取锁；若获取锁成功，则写入Map
+        String lockPath = internals.attemptLock(time, unit, getLockNodeBytes());
+        if (lockPath != null) {
+            LockData newLockData = new LockData(currentThread, lockPath);
+            threadData.put(currentThread, newLockData);
+            return true;
+        }
+        return false;
     }
 
-    /**
-     * Perform one release of the mutex if the calling thread is the same thread that acquired it. If the
-     * thread had made multiple calls to acquire, the mutex will still be held when this method returns.
-     *
-     * @throws Exception ZK errors, interruptions, current thread does not own the lock
-     */
+    /** 释放锁 */
     @Override
     public void release() throws Exception {
-        /*
-           Note on concurrency: a given lockData instance
-           can be only acted on by a single thread so locking isn't necessary
-        */
-
+        // #1 判断是否重入
         Thread currentThread = Thread.currentThread();
         LockData lockData = threadData.get(currentThread);
         if (lockData == null) {
             throw new IllegalMonitorStateException("You do not own the lock: " + basePath);
         }
-
         int newLockCount = lockData.lockCount.decrementAndGet();
         if (newLockCount > 0) {
             return;
@@ -110,6 +92,7 @@ public class InterProcessMutex implements InterProcessLock, Revocable<InterProce
         if (newLockCount < 0) {
             throw new IllegalMonitorStateException("Lock count has gone negative for lock: " + basePath);
         }
+        // 若重入次数为0，则释放锁
         try {
             internals.releaseLock(lockData.lockPath);
         } finally {
@@ -117,12 +100,11 @@ public class InterProcessMutex implements InterProcessLock, Revocable<InterProce
         }
     }
 
-    /**
-     * Return a sorted list of all current nodes participating in the lock
-     *
-     * @return list of nodes
-     * @throws Exception ZK errors, interruptions, etc.
-     */
+    @Override
+    public boolean isAcquiredInThisProcess() {
+        return (threadData.size() > 0);
+    }
+
     public Collection<String> getParticipantNodes() throws Exception {
         return LockInternals.getParticipantNodes(
                 internals.getClient(), basePath, internals.getLockName(), internals.getDriver());
@@ -143,17 +125,6 @@ public class InterProcessMutex implements InterProcessLock, Revocable<InterProce
         }));
     }
 
-    InterProcessMutex(
-            CuratorFramework client, String path, String lockName, int maxLeases, LockInternalsDriver driver) {
-        basePath = PathUtils.validatePath(path);
-        internals = new LockInternals(client, driver, path, lockName, maxLeases);
-    }
-
-    /**
-     * Returns true if the mutex is acquired by the calling thread
-     *
-     * @return true/false
-     */
     public boolean isOwnedByCurrentThread() {
         LockData lockData = threadData.get(Thread.currentThread());
         return (lockData != null) && (lockData.lockCount.get() > 0);
@@ -168,28 +139,4 @@ public class InterProcessMutex implements InterProcessLock, Revocable<InterProce
         return lockData != null ? lockData.lockPath : null;
     }
 
-    private boolean internalLock(long time, TimeUnit unit) throws Exception {
-        /*
-           Note on concurrency: a given lockData instance
-           can be only acted on by a single thread so locking isn't necessary
-        */
-
-        Thread currentThread = Thread.currentThread();
-
-        LockData lockData = threadData.get(currentThread);
-        if (lockData != null) {
-            // re-entering
-            lockData.lockCount.incrementAndGet();
-            return true;
-        }
-
-        String lockPath = internals.attemptLock(time, unit, getLockNodeBytes());
-        if (lockPath != null) {
-            LockData newLockData = new LockData(currentThread, lockPath);
-            threadData.put(currentThread, newLockData);
-            return true;
-        }
-
-        return false;
-    }
 }
